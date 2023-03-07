@@ -1,0 +1,55 @@
+#!/bin/bash
+
+if [[ ${1} == "run" ]]
+then
+  shift
+  name=$1
+  wait=$2
+  rc=0
+  _s=$(date +%s)
+  curl -sf hrm.wyga.it/$name:$wait || rc=$?
+  _e=$(date +%s)
+  _t=$(( _e - _s )) || true
+  printf "NAME: %-20s WAIT: %-4s TOOK: %-4s RC: %-3s DATE: %s\n" "$name" "$wait" "$_t" "$rc" "$(date +"%H:%M:%S %N")" | tee -a output
+  exit $rc
+fi
+if [[ -n $1 ]]
+then
+  iterations=$1
+  shift
+else
+  iterations=1
+fi
+if [[ -n $1 ]]
+then
+  sname=$1
+fi
+declare -a _pids
+declare -A _names
+declare -A _out
+for i in $(seq 1 $iterations)
+do
+  if [[ -z $sname ]]
+  then
+    name=$(mktemp -u XXXXXXXXXXX)
+  else
+    name=$sname
+  fi
+  rand=$(( 10 + RANDOM % 10 ))
+  tmp=$(mktemp -p /dev/shm load-test-XXXXXXXXXX)
+  $0 run $name $rand 0 &>$tmp &
+  echo "SPWAN $name $rand"
+  pid=$!
+  _pids+=( $pid )
+  _names[$pid]=$name
+  _out[$pid]=$tmp
+done
+echo "TOTAL: ${#_pids[@]}"
+for n in ${_pids[@]}
+do
+  rc=0
+  wait -np result || rc=$?
+  echo R: $result RC: $rc NAME: ${_names[$result]} 
+#  cat ${_out[$result]}
+  rm ${_out[$result]}
+done

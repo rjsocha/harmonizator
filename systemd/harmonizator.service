@@ -1,0 +1,14 @@
+[Unit]
+Description=Harmonizator service
+
+[Service]
+Type=simple
+Restart=always
+Environment="HARMONIZATOR_QUIET="
+Environment="HARMONIZATOR_LISTEN=:80"
+ExecStart=/usr/local/sbin/harmonizator
+User=harmonizator
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
