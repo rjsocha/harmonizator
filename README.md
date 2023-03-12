@@ -1,6 +1,6 @@
 # HARMONIZATOR
 
-## Version 0.1.0
+## Version 0.5.1
 
 Allow to start some CLI task easly at the same time.
 
@@ -17,3 +17,14 @@ curl -sf hrm.wyga.it/hello:100 && echo "Hello World!"
 
 This will wait up to 100 seconds and trigger next command (echo in above example).
 
+## Trigger mode
+
+```
+curl -sf hrm.wyga.it/hello && echo "Hello World!"
+```
+
+Trigger job via:
+
+```
+curl -sf hrm.wyga.it/hello:run
+```
