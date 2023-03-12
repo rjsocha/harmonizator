@@ -6,3 +6,6 @@ release:
 
 debug:
 	CGO_ENABLED=1 go build -race harmonizator.go
+
+install-client:
+	sudo install hrm /usr/local/bin/hrm

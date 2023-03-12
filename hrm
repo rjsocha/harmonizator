@@ -1,0 +1,2 @@
+#!/bin/sh
+exec curl -sf "http://hrm.wyga.it/${1}"
