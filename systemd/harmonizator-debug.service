@@ -1,0 +1,14 @@
+[Unit]
+Description=Harmonizator service
+
+[Service]
+Type=simple
+Restart=always
+Environment="HARMONIZATOR_QUIET="
+Environment="HARMONIZATOR_LISTEN=127.1.1.1:8880"
+Environment="GODEBUG=gctrace=1"
+ExecStart=/usr/local/sbin/harmonizator
+User=harmonizator
+
+[Install]
+WantedBy=multi-user.target

@@ -1,24 +1,41 @@
 package main
-// alpha version 
-// it's broken (some race conditions found)
-// but it's working 
+// Version: 0.5.1
 
 import (
-  "log"
+	"fmt"
 	"net/http"
+	"time"
+	"strconv"
+	"runtime"
+	"strings"
 	"os"
-  "os/signal"
-  "syscall"
-  "time"
-  "regexp"
-  "sync"
-  "strconv"
-  "runtime"
 )
 
-var lock sync.Mutex
-var keys = make(map[string]*sync.Mutex)
-var be_quiet bool = false
+const JOB_TIMEOUT = 60*60
+const JOB_TRIGGER_TIMEOUT = 60*60
+
+type ES struct{}
+
+type Control struct {
+	msg	string
+	err	error
+}
+
+type Job struct {
+	blocker chan ES
+	timeout chan ES
+	abort		chan ES
+	mode 		int
+	sleep 	int
+	name		string
+	start		time.Time
+}
+
+type Harmonizator struct {
+	jobs	map[string]Job
+	control chan Control
+	mutex chan ES
+}
 
 func getenv(key, fallback string) string {
     value := os.Getenv(key)
@@ -28,88 +45,162 @@ func getenv(key, fallback string) string {
     return value
 }
 
-func logmer(r *http.Request, info string) {
-  if ! be_quiet {
-    lock.Lock()
-    log.Printf("%v %v %v/%v %v %v",r.Host,r.RemoteAddr,runtime.NumGoroutine(),len(keys),r.RequestURI,info)
-    lock.Unlock()
-  }
+func (hrm Harmonizator) Lock() {
+	<- hrm.mutex
 }
 
-func serve(w http.ResponseWriter, r *http.Request) {
-  uri:=r.RequestURI
-  if uri == "/info" {
-    logmer(r,"200 INFO")
-    return
-  }
-  re,_ := regexp.Compile(`^/([^:]+):([0-9]{1,4})$`)
-  if re.MatchString(uri) {
-    param:=re.FindStringSubmatch(uri)
-    tm, err := strconv.Atoi(param[2])
-    if err != nil {
-      logmer(r,"500")
-      w.WriteHeader(500)
-      return
-	  } 
-    if tm < 1 || tm > 3600 {
-      logmer(r,"403")
-      w.WriteHeader(403)
-      return
-    }
-    lock.Lock()
-    if m,ok:=keys[uri]; ok {
-      lock.Unlock()
-      logmer(r,"102")
-      m.Lock()
-      m.Unlock()
-      logmer(r,"100")
-    } else {
-      keys[uri]=new(sync.Mutex)
-      keys[uri].Lock()
-      lock.Unlock()
-      logmer(r,"201 WAIT")
-      abort:=false
-      select {
-        case <-time.After(time.Duration(tm) * time.Second):
-        case <-r.Context().Done():
-            abort=true
-      }
-      lock.Lock()
-      keys[uri].Unlock()
-      // I'm counting on GC here to cleanup mutexes
-      delete(keys,uri)
-      lock.Unlock()
-      if abort {
-        logmer(r,"200 CANCEL")
-      } else {
-        logmer(r,"200 DONE")
-      }
-    }
-  } else {
-    logmer(r,"404")
-    w.WriteHeader(404)
-  }
+func (hrm Harmonizator) Unlock() {
+	hrm.mutex <- ES{}
 }
 
-func shutdown_me(shutChan chan os.Signal) {
-  <- shutChan
-  os.Exit(0)
+func master_timeout(hrm Harmonizator, job Job) {
+	select {
+		case <-time.After(time.Second * time.Duration(job.sleep)):
+			close(job.blocker)
+			break
+		case <-time.After(JOB_TIMEOUT*time.Second):
+			close(job.timeout)
+			break
+		case <- job.blocker:
+	}
+	hrm.Lock()
+	delete(hrm.jobs,job.name)
+	hrm.Unlock()
+}
+
+func master_trigger(hrm Harmonizator,job Job) {
+	select {
+		case <-time.After(JOB_TRIGGER_TIMEOUT * time.Second):
+			close(job.timeout)
+			break
+		case <- job.blocker:
+		case <- job.abort:
+	}
+	hrm.Lock()
+	delete(hrm.jobs,job.name)
+	hrm.Unlock()
+}
+
+// Returns name, option, mode and timeout
+func parseUri(rawuri string) (string,string,int,int) {
+	uri:=strings.SplitN(rawuri[1:],":",2)
+	name:=uri[0]
+	// 1 trigger, 2 timeout
+	mode:=int(1)
+	sleeptime:=int(0)
+	opt:=""
+	if len(uri) > 1 {
+		if st,err:=strconv.ParseUint(uri[1],10,64); err == nil {
+				mode=2
+				if st >= JOB_TIMEOUT {
+					st=JOB_TIMEOUT-1
+				}
+				sleeptime=int(st)
+				name=fmt.Sprintf("%s:%d",name,sleeptime)
+		} else {
+			opt=uri[1]
+		}
+	}
+	return name,opt,mode,sleeptime
+}
+
+func timeTrack(start time.Time,name string) {
+	fmt.Printf("'%s' TOOK %s\n",name,time.Since(start))
+}
+
+func (hrm Harmonizator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	name,opt,mode,sleeptime:=parseUri(r.RequestURI)
+	remote:=r.Header.Get("X-Remote-Addr")
+	if remote == "" {
+		ip:=strings.Split(r.RemoteAddr,":")
+		remote=ip[0]
+	}
+	if name == "" {
+		//indexPage(w)
+		return
+	}
+	hrm.Lock()
+	job,ok:=hrm.jobs[name]
+	if ! ok {
+		job=Job{ name: name, sleep: sleeptime, mode: mode, start: time.Now()}
+		job.blocker=make(chan ES)
+		job.timeout=make(chan ES)
+		job.abort=make(chan ES)
+		hrm.jobs[name]=job
+		if sleeptime > 0 {
+			go master_timeout(hrm,job)
+		} else {
+			go master_trigger(hrm,job)
+		}
+		fmt.Printf("JOB START '%s' MODE %v TIMEOUT %v %v %v\n", name, mode, sleeptime,r.Host,remote)
+	} else {
+		job=hrm.jobs[name]
+		if sleeptime > 0 {
+			t:=job.sleep-int(time.Now().Sub(job.start).Seconds())
+			fmt.Printf("QUEUE JOB: %v (%v s AGO / LEFT %v s) %v %v\n",job.name,int(time.Since(job.start).Seconds()),t,r.Host,remote)
+		} else {
+			fmt.Printf("QUEUE JOB: %v (STARTED %v s AGO) %v %v\n",job.name,int(time.Since(job.start).Seconds()),r.Host,remote)
+		}
+	}
+	hrm.Unlock()
+	if mode == 1 && ( opt == "start" || opt == "run" ) {
+		fmt.Printf("TRIGGER JOB: %v %v %v\n",name,r.Host,remote)
+		close(job.blocker)
+		return
+	} else if mode == 1 && ( opt == "abort" || opt == "cancel" ) {
+		fmt.Printf("CANCEL JOB: %v %v %v\n",name,r.Host,remote)
+		close(job.abort)
+		return
+	}
+	abort:=false
+	timeout:=false
+	select {
+		case <-job.blocker:
+			fmt.Printf("JOB UNLOCKED: %s %v %v\n",name,r.Host,remote)
+		case <-job.timeout:
+			fmt.Printf("JOB TIMEOUT: %s %v %v\n",name,r.Host,remote)
+      abort=true
+			timeout=true
+    case <-r.Context().Done():
+			fmt.Printf("CLIENT ABORT: %s %v %v\n",name,r.Host,remote)
+      abort=true
+		case <-job.abort:
+			fmt.Printf("JOB ABORT: %s %v %v\n",name,r.Host,remote)
+			abort=true
+  }
+	if timeout || abort {
+		w.WriteHeader(404)
+	}
+	return
 }
 
 func main() {
-  if getenv("HARMONIZATOR_QUIET","") != "" {
-    be_quiet = true
-  }
-  shutChan := make(chan os.Signal, 1)
-  signal.Notify(shutChan, syscall.SIGTERM, syscall.SIGINT,syscall.SIGQUIT)
-  go shutdown_me(shutChan)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", serve)
-  err := http.ListenAndServe(getenv("HARMONIZATOR_LISTEN",":80"), mux)
-  if err != nil {
-    if ! be_quiet {
-      log.Printf("- - 500 ERROR %s", err)
-    }
-    os.Exit(1)
-  }
+	hrm:=Harmonizator{}
+	hrm.jobs=make(map[string]Job)
+	hrm.mutex=make(chan ES,1)
+	hrm.control=make(chan Control,1)
+	hrm.Unlock()
+
+	go func() {
+		err:=http.ListenAndServe(getenv("HARMONIZATOR_LISTEN",":80"),hrm)
+		hrm.control <- Control{ msg: "server-abort", err: err }
+	}()
+
+	loop:
+	for {
+			select {
+				case cntrl,isopen:=<-hrm.control:
+					if !isopen {
+							fmt.Printf("SERVER SHUTDOWN\n")
+							break loop
+					}
+					switch cntrl.msg {
+						case "server-abort":
+							fmt.Printf("SERVER-ABORT: %v\n",cntrl.err)
+							break loop
+					}
+				case <-time.After(30 * time.Second):
+					fmt.Printf("- PING %v -\n",runtime.NumGoroutine())
+			}
+	}
 }

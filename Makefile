@@ -1,8 +1,8 @@
 all: release
 
 release:
-	go build -ldflags="-s -w" harmonizator.go
-	upx -9 harmonizator
+	CGO_ENABLED=0 go build -ldflags="-s -w" harmonizator.go
+	upx --lzma harmonizator
 
 debug:
-	go build -race harmonizator.go
+	CGO_ENABLED=1 go build -race harmonizator.go
